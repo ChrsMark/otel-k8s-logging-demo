@@ -1,0 +1,242 @@
+mode: daemonset
+presets:
+  logsCollection:
+    enabled: true
+  kubernetesAttributes:
+    enabled: true
+
+image:
+  repository: otel/opentelemetry-collector-contrib
+
+securityContext:
+  runAsUser: 0
+  runAsGroup: 0
+
+extraEnvs:
+  - name: ELASTIC_AGENT_OTEL
+    value: "true"
+  - name: ELASTIC_ENDPOINT
+    valueFrom:
+      secretKeyRef:
+        name: elastic-secret-ds
+        key: elastic_endpoint
+  - name: ELASTIC_API_KEY
+    valueFrom:
+      secretKeyRef:
+        name: elastic-secret-ds
+        key: elastic_api_key
+  - name: K8S_NODE_NAME
+    valueFrom:
+      fieldRef:
+        fieldPath: spec.nodeName
+
+# kubeletstats additional rules for Node metrics
+clusterRole:
+  create: true
+  rules:
+    - apiGroups:
+        - ""
+      resources:
+        - nodes/proxy
+      verbs:
+        - get
+    - apiGroups:
+        - ""
+      resources:
+        - nodes
+      verbs:
+        - get
+        - watch
+        - list
+
+config:
+  extensions:
+    health_check:
+      endpoint: ${env:MY_POD_IP}:13133
+  exporters:
+    debug/2:
+      verbosity: detailed
+    debug:
+      verbosity: basic
+    elasticsearch:
+      endpoints:
+        - ${env:ELASTIC_ENDPOINT}
+      api_key: ${env:ELASTIC_API_KEY}
+      logs_dynamic_index:
+        enabled: true
+      metrics_dynamic_index:
+        enabled: true
+      mapping:
+        mode: ecs
+  processors:
+    batch: {}
+    transform:
+      error_mode: silent
+      log_statements:
+        - context: log
+          statements:
+            - merge_maps(cache,ExtractPatterns(body,"io.opentelemetry.exporter.logging.otlp.OtlpJsonLoggingLogRecordExporter - (?P<log>.*)"), "upsert") where body != nil
+            - set(body,cache["log"])
+            - merge_maps(cache,ParseJSON(body), "upsert") where body!= nil
+            - delete_key(cache, "schemaUrl")
+            - set(body,Concat(["{\"resourceLogs\":[",cache,"]}"], ""))
+    resourcedetection/eks:
+      detectors: [env, eks]
+      timeout: 15s
+      override: true
+      eks:
+        resource_attributes:
+          k8s.cluster.name:
+            enabled: true
+    resourcedetection/gcp:
+      detectors: [env, gcp]
+      timeout: 2s
+      override: true
+    resource/k8s:
+      attributes:
+        - key: service.name
+          from_attribute: app.label.component
+          action: insert
+    attributes/k8s_logs_dataset:
+      actions:
+        - key: data_stream.dataset
+          value: "kubernetes.container_logs"
+          action: upsert
+    attributes/dataset:
+      actions:
+        - key: event.dataset
+          from_attribute: data_stream.dataset
+          action: upsert
+    resource/cloud:
+      attributes:
+        - key: cloud.instance.id
+          from_attribute: host.id
+          action: insert
+    resource/demo:
+      attributes:
+        - key: deployment.environment
+          value: "opentelemetry-demo"
+          action: upsert
+    resource/process:
+      attributes:
+        - key: process.executable.name
+          action: delete
+        - key: process.executable.path
+          action: delete
+    resourcedetection/system:
+      detectors: ["system", "ec2"]
+      system:
+        hostname_sources: [ "os" ]
+        resource_attributes:
+          host.name:
+            enabled: true
+          host.id:
+            enabled: false
+          host.arch:
+            enabled: true
+          host.ip:
+            enabled: true
+          host.mac:
+            enabled: true
+          host.cpu.vendor.id:
+            enabled: true
+          host.cpu.family:
+            enabled: true
+          host.cpu.model.id:
+            enabled: true
+          host.cpu.model.name:
+            enabled: true
+          host.cpu.stepping:
+            enabled: true
+          host.cpu.cache.l2.size:
+            enabled: true
+          os.description:
+            enabled: true
+          os.type:
+            enabled: true
+      ec2:
+        resource_attributes:
+          host.name:
+            enabled: false
+          host.id:
+            enabled: true
+    k8sattributes:
+      filter:
+        node_from_env_var: K8S_NODE_NAME
+      passthrough: false
+      pod_association:
+        - sources:
+            - from: resource_attribute
+              name: k8s.pod.ip
+        - sources:
+            - from: resource_attribute
+              name: k8s.pod.uid
+        - sources:
+            - from: connection
+      extract:
+        metadata:
+          - "k8s.namespace.name"
+          - "k8s.deployment.name"
+          - "k8s.statefulset.name"
+          - "k8s.daemonset.name"
+          - "k8s.cronjob.name"
+          - "k8s.job.name"
+          - "k8s.node.name"
+          - "k8s.pod.name"
+          - "k8s.pod.uid"
+          - "k8s.pod.start_time"
+        labels:
+          - tag_name: app.label.component
+            key: app.kubernetes.io/component
+            from: pod
+  receivers:
+    otlp: null
+    jaeger: null
+    prometheus: null
+    zipkin: null
+    filelog:
+      retry_on_failure:
+        enabled: true
+      start_at: end
+      exclude:
+        # exlude collector logs
+        - /var/log/pods/*/opentelemetry-collector/*.log
+      include:
+        - /var/log/pods/*/*/*.log
+      include_file_name: false
+      include_file_path: true
+      operators:
+        - id: container-parser
+          type: container
+
+  connectors:
+    routing:
+      default_pipelines: [ logs/default ]
+      error_mode: ignore
+      table:
+        - statement: route() where attributes["k8s.container.name"] =="adservice"
+          pipelines: [ logs/rawotlp ]
+    otlpjson:
+
+  service:
+    extensions: [health_check]
+    pipelines:
+      logs:
+        receivers: [ filelog ]
+        exporters: [ routing ]
+      logs/rawotlp:
+        receivers: [ routing ]
+        processors: [ transform ]
+        exporters: [ otlpjson ]
+      logs/otlp:
+        receivers: [ otlpjson ]
+        exporters: [ debug/2, elasticsearch ]
+      logs/default:
+        receivers: [routing]
+        processors: [batch, k8sattributes, resourcedetection/system, resourcedetection/gcp, resource/demo, resource/k8s, resource/cloud, attributes/k8s_logs_dataset]
+        exporters: [debug, elasticsearch]
+      metrics: null
+      traces: null
+    telemetry:
+      metrics:
+        address: ${env:MY_POD_IP}:8888
