@@ -45,7 +45,7 @@ components:
         value: '{{ include "otel-demo.name" . }}-flagd'
       - name: FLAGD_PORT
         value: "8013"
-      - name: OTEL_EXPORTER_OTLP_ENDPOINT
+      - name: OTEL_EXPORTER_OTLP_TRACES_ENDPOINT
         value: http://$(OTEL_COLLECTOR_NAME):4318
       - name: OTEL_LOGS_EXPORTER
         value: logging-otlp #otlp
