@@ -24,10 +24,10 @@ spec:
           args:
             - /bin/sh
             - -c
-            - while true; do echo "otel logs at $(date +%H:%M:%S)" && sleep 0.1s; done
+            - while true; do echo "otel logs at $(date +%H:%M:%S)" && sleep 1s; done
         - name: busybox
           image: busybox
           args:
             - /bin/sh
             - -c
-            - while true; do echo "otel logs at $(date +%H:%M:%S)" && sleep 0.1s; done
+            - while true; do echo "otel logs at $(date +%H:%M:%S)" && sleep 1s; done
